@@ -72,12 +72,12 @@ def get_temp_file_name(id):
         return tmp.name
 
 
-def create_assignment_json(assignments, id):
+def create_assignment_json(assignments, id, version=1):
     data = {
         "partitions": [
             {"topic": x["topic"], "partition": x["partition"], "replicas": x["to"]} for x in assignments
         ],
-        "version": 1
+        "version": version
     }
     file_path = get_temp_file_name(id)
     with open(file_path, 'w') as f:
@@ -94,7 +94,7 @@ def verify_assignment(assignment_file):
         raise Exception("error while verifying\ncode: {}\nstderr: {}".format(code, stderr))
     reassignment_lines = [x for x in stdout if x.startswith("Reassignment")]
     in_progress = len([x for x in reassignment_lines if x.endswith("is still in progress")])
-    completed = len([x for x in reassignment_lines if x.endswith("completed successfully")])
+    completed = [x for x in reassignment_lines if x.endswith("completed successfully")]
     logging.debug("verify output: %s", "\n".join(stdout))
     logging.debug("in_progress: %s", in_progress)
     logging.debug("completed: %s", completed)
@@ -128,6 +128,30 @@ def change_throttle(assignment_file, new_throttle):
         logging.info("tool output:\n%s", stdout)
         raise Exception("couldnt change the throttle")
 
+def get_completed_partition_from_logs(completed):
+    completed_partitions = {}
+    split = completed.split("\n")
+    for log in split:
+        res = re.sub("] completed successfully", '', log)
+        res1 = re.sub("Reassignment of partition ", '', res)[1:]
+        topic_split = res1.split(",")
+        if topic_split[0] not in completed_partitions:
+            partition = []
+        else:
+            partition = completed_partitions[topic_split[0]]
+        partition.append(topic_split[1])
+        completed_partitions[topic_split[0]] = partition
+
+
+def recreacte_assignment_json(assignments, id, completed):
+    completed_partitions = get_completed_partition_from_logs(completed)
+
+    for index,assignment in enumerate(assignments):
+        if (assignment["topic"] in completed_partitions) & (str(assignment["partition"]) in completed_partitions[assignment["topic"]]):
+            logging.info("deleting completed assignment from plan: " + str(assignment))
+            del assignments[index]
+
+    return create_assignment_json(assignments, id, 2)
 
 def next_throttle(i):
     return (throttle[i:-1] + throttle[-1:])[0]
@@ -137,9 +161,12 @@ def reassign(assignments, id):
     file_path = create_assignment_json(assignments, id)
     (in_progress, completed, stdout, stderr) = verify_assignment(file_path)
     partitions = len(assignments)
-    if completed == partitions:
+    if len(completed) == partitions:
         logging.info("reassignment completed successfully")
         return
+    if len(completed) > 0 & len(completed) < in_progress:
+        print ("Partial re-assignment done for partitions")
+        file_path = recreacte_assignment_json(assignments, id, completed)
     if in_progress == 0:
         logging.info("starting reassignment of partitions")
         begin_reassignment(file_path, next_throttle(0))
@@ -149,11 +176,11 @@ def reassign(assignments, id):
     while True:
         time.sleep(retry_after)
         (in_progress, completed, stdout, stderr) = verify_assignment(file_path)
-        if completed == partitions:
+        if len(completed) == partitions:
             logging.info("reassignment completed successfully")
             return
         elif in_progress > 0:
-            logging.info("reassignemnt is still in progress. Retrying after %s seconds", retry_after)
+            logging.info("reassignment is still in progress. Retrying after %s seconds", retry_after)
         else:
             raise Exception("reassignment failed.\nstdout:\n%s\nstderr:\n%s", "\n".join(stdout), "\n".join("stderr"))
         retry_count = retry_count + 1
