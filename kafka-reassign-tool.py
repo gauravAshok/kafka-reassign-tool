@@ -143,7 +143,7 @@ def get_completed_partition_from_logs(completed):
         completed_partitions[topic_split[0]] = partition
 
 
-def recreacte_assignment_json(assignments, id, completed):
+def recreate_assignment_json(assignments, id, completed):
     completed_partitions = get_completed_partition_from_logs(completed)
 
     for index,assignment in enumerate(assignments):
@@ -165,8 +165,8 @@ def reassign(assignments, id):
         logging.info("reassignment completed successfully")
         return
     if len(completed) > 0 & len(completed) < in_progress:
-        print ("Partial re-assignment done for partitions")
-        file_path = recreacte_assignment_json(assignments, id, completed)
+        logging.info("Partial re-assignment done for partitions")
+        file_path = recreate_assignment_json(assignments, id, completed)
     if in_progress == 0:
         logging.info("starting reassignment of partitions")
         begin_reassignment(file_path, next_throttle(0))
