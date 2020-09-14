@@ -7,6 +7,7 @@ import argparse
 import logging
 import re
 import time
+import hashlib
 
 DEFAULT_KAFKA_ROOT = '/usr/share/varadhi-kafka'
 DEFAULT_KAFKA_CONFIG = '/config/server.properties'
@@ -19,7 +20,7 @@ input_assignment = None
 throttle = None
 throttle_getter = None
 retry_after = None
-
+script_progress_file = None
 
 def set_logger(debug):
     level = logging.DEBUG if debug else logging.INFO
@@ -169,6 +170,16 @@ def load_throttle_from_file():
     with open('throttle.json', 'r') as f:
         return json.load(f)
 
+def get_script_progress():
+    if os.path.exists(script_progress_file):
+        with open(script_progress_file, 'r') as f:
+            return int(f.read())
+    else:
+        return 0
+
+def save_script_progress(index):
+    with open(script_progress_file, 'w') as f:
+        f.write(str(index))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -188,8 +199,10 @@ if __name__ == "__main__":
     kafka_root = args.kafka_home
     zookeeper_url = args.zookeeper
     input_file = args.input
-    with open(args.input, 'r') as f:
-        input_assignment = json.load(f)
+    with open(input_file, 'r') as f:
+        content = f.read()
+        input_assignment = json.loads(content)
+        script_progress_file = hashlib.md5(content.encode('utf-8')).hexdigest()
     retry_after = args.retry_after
     set_logger(args.debug)
 
@@ -208,9 +221,12 @@ if __name__ == "__main__":
     logging.info("first throttle: %s", next_throttle(0))
     logging.info("retry after: %s", retry_after)
 
-
-
+    start_index = get_script_progress()
     for i in range(0, len(input_assignment)):
-        # refetch throttle values
-        throttle = throttle_getter()
-        reassign(input_assignment[i], i)
+        if i < start_index:
+            logging.info("skipping request %s as it was completed previously", i)
+        else:
+            # refetch throttle values
+            save_script_progress(i)
+            throttle = throttle_getter()
+            reassign(input_assignment[i], i)
