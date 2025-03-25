@@ -289,6 +289,7 @@ def reassign(assignments, id, throttles):
         else:
             logging.info("reassigning topic: %s partition: %s", topic, partition)
             pass
+    logging.info("reassigning based on the assignment plan")
     reassign_partitions(assignments, id, throttles)
 
 
@@ -318,13 +319,14 @@ def partition_reassignment(input_file, throttles):
 
     start_index = get_script_progress(script_progress_file)
     for i in range(0, len(input_assignment)):
+        logging.info("Starting partition reassignment : {}\n{}".format(i, json.dumps(input_assignment[i], indent=2)))
         if i < start_index:
             logging.info("skipping request %s as it was completed previously", i)
         else:
             # refetch throttle values
             save_script_progress(script_progress_file, i)
             reassign(input_assignment[i], i, throttles)
-
+        time.sleep(10)
 
 # file content is like:
 # preferred_leader=<int>
@@ -361,9 +363,10 @@ def island_topics_reassignment(input_file, throttles):
             "to": rotate(to, partition % 3),
             "preferred_leader": preferred_leader
         }])
-    with open(file_hash, 'w') as f:
+    output_file = input_file + "-" + file_hash + "-reassign"
+    with open(output_file, 'w') as f:
         f.write(json.dumps(assignments, indent=2))
-    logging.info("Generated the partition assignment plan in file: %s", file_hash)
+    logging.info("Generated the partition assignment plan in file: %s", output_file)
 
 
 if __name__ == "__main__":
