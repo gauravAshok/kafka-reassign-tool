@@ -181,12 +181,97 @@ def save_script_progress(index):
     with open(script_progress_file, 'w') as f:
         f.write(str(index))
 
+
+def generate_assignment_from_topic_list(topic_list_file, destination_brokers, partition_range=None):
+    """
+    Reads a file containing topic names (one per line) and generates a partition 
+    assignment JSON structure as expected by the tool.
+    
+    Args:
+        topic_list_file (str): Path to file containing topic names (one per line)
+        destination_brokers (list): List of broker IDs where to move partitions
+        partition_range (tuple): Optional tuple (from, to) to specify partition range to consider. 
+                                 If not provided, all partitions will be considered. range is inclusive
+    
+    Returns:
+        list: List of lists of partition assignments
+    """
+    if not os.path.exists(topic_list_file):
+        raise Exception(f"Topic list file {topic_list_file} does not exist")
+    
+    # Read topic names from file
+    with open(topic_list_file, 'r') as f:
+        topics = [line.strip() for line in f.readlines() if line.strip()]
+    
+    if not topics:
+        raise Exception("No topics found in the input file")
+    
+    # Validate destination brokers
+    if not destination_brokers or len(destination_brokers) < 1:
+        raise Exception("Destination brokers list must contain at least one broker ID")
+    
+    # Generate assignment
+    assignment = []
+    topic_assignment = []
+    
+    for topic in topics:
+        partition_count = describe_topic_partition(topic)
+        if partition_range:
+            partition_from, partition_to = partition_range
+        else:
+            partition_from, partition_to = (0, partition_count - 1)
+        
+        # Create assignment for all partitions of this topic
+        
+        for partition in range(partition_count):
+
+            if partition < partition_from or partition > partition_to:
+                logging.info(f"Skipping partition {partition} for topic {topic} as it is outside the specified range [{partition_from}-{partition_to}]")
+                continue
+
+            # Rotate the broker list for each partition to distribute leadership
+            replica_assignment = destination_brokers[partition % len(destination_brokers):] + destination_brokers[:partition % len(destination_brokers)]
+            
+            topic_assignment.append({
+                "topic": topic,
+                "partition": partition,
+                "to": replica_assignment
+            })
+            if len(topic_assignment) >= 25:
+                # If we have 25 assignments, add them to the main assignment list
+                assignment.append(topic_assignment)
+                logging.info(f"Created a new batch of {len(topic_assignment)} partitions")
+                topic_assignment = []
+        # Add this topic's partitions as a group
+        logging.info(f"Added assignment for topic {topic} with {partition_count} partitions")
+    logging.info(f"Created the final batch of {len(topic_assignment)} partitions")
+    assignment.append(topic_assignment)
+    return assignment
+
+# returns the partition count of the topic. None if failed to describe the topic
+def describe_topic_partition(topic):
+    (stdout, stderr, code) = run(get_kafka_root() + '/bin/kafka-topics.sh', ['--zookeeper', get_zk_url(), '--describe', '--topic', topic])
+    if code != 0:
+        raise Exception("error while describing topic\ncode: {}\nstderr: {}".format(code, stderr))
+    # example describe output is like:
+    # Topic:persephone_job_updates	PartitionCount:3	ReplicationFactor:3	Configs:
+	#   Topic: persephone_job_updates	Partition: 0	Leader: 11	Replicas: 13,12,11	Isr: 13,12,11
+    for line in stdout:
+        # regular exp for partitionCount:3
+        m = re.search("PartitionCount:(\d+)", line)
+        if m is not None:
+            partition_count = int(m.group(1))
+            return partition_count
+    raise Exception("error while describing topic\ncode: {}\nstdout: {}".format(code, stdout))
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--kafka-home", help="Root directory of the Kafka installation. Default: {}".format(
         DEFAULT_KAFKA_ROOT), default=DEFAULT_KAFKA_ROOT)
     parser.add_argument(
         "--zookeeper", help="The connection string for the zookeeper connection. If not specified, an attempt to read it from Kafka config file is made")
+    parser.add_argument(
+        "--generate", help="generate the partition migration json using the input file which must contain topic list")
     parser.add_argument("input", help="File containing partition assignment")
     parser.add_argument(
         "--throttle", help="Replication throttle in B/s. If not given, throttle.json file will be loaded", type=str, default=None)
@@ -199,10 +284,6 @@ if __name__ == "__main__":
     kafka_root = args.kafka_home
     zookeeper_url = args.zookeeper
     input_file = args.input
-    with open(input_file, 'r') as f:
-        content = f.read()
-        input_assignment = json.loads(content)
-        script_progress_file = hashlib.md5(content.encode('utf-8')).hexdigest()
     retry_after = args.retry_after
     set_logger(args.debug)
 
@@ -220,6 +301,19 @@ if __name__ == "__main__":
     logging.info("throttle: %s", throttle)
     logging.info("first throttle: %s", next_throttle(0))
     logging.info("retry after: %s", retry_after)
+
+    if args.generate is not None:
+        destination_brokers = [961, 962, 963]
+        input_assignment = generate_assignment_from_topic_list(input_file, destination_brokers)
+        with open(input_file + ".pa.json", 'w') as f:
+            json.dump(input_assignment, f, indent=2)
+            logging.info("Generated partition assignment JSON and saved to %s.pa.json", input_file)
+        exit(0)
+
+    with open(input_file, 'r') as f:
+        content = f.read()
+        input_assignment = json.loads(content)
+        script_progress_file = hashlib.md5(content.encode('utf-8')).hexdigest()
 
     start_index = get_script_progress()
     for i in range(0, len(input_assignment)):
